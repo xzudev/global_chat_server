@@ -10,22 +10,41 @@ const rooms = {};
 
 // Rate limiting configuration
 const BUCKET_CAPACITY = 5; // Maximum tokens a user can have
-const REFILL_RATE = 1; // Tokens per second
-const REFILL_INTERVAL = 1000; // Check every 1 second
+const BASE_REFILL_RATE = 1; // Base tokens per second
+const MIN_REFILL_INTERVAL = 1000; // Minimum time between refills (ms)
+const PENALTY_MULTIPLIER = 2; // How much to increase cooldown on spam
+const PENALTY_DURATION = 30000; // How long penalties last (30 seconds)
+const MAX_PENALTIES = 4; // Maximum number of penalty levels
 const MAX_MESSAGE_LENGTH = 500;
 
-class TokenBucket {
+class AdaptiveTokenBucket {
   constructor() {
     this.tokens = BUCKET_CAPACITY;
     this.lastRefill = Date.now();
+    this.penaltyLevel = 0;
+    this.lastPenaltyTime = 0;
+    this.consecutiveFailures = 0;
+  }
+
+  getCurrentRefillRate() {
+    const now = Date.now();
+    // Reset penalty level if penalty duration has passed
+    if (this.penaltyLevel > 0 && (now - this.lastPenaltyTime) > PENALTY_DURATION) {
+      this.penaltyLevel = 0;
+      this.consecutiveFailures = 0;
+    }
+    // Calculate current refill rate based on penalty level
+    return BASE_REFILL_RATE / Math.pow(PENALTY_MULTIPLIER, this.penaltyLevel);
   }
 
   refill() {
     const now = Date.now();
     const timePassed = (now - this.lastRefill) / 1000; // Convert to seconds
+    const currentRate = this.getCurrentRefillRate();
+    
     this.tokens = Math.min(
       BUCKET_CAPACITY,
-      this.tokens + timePassed * REFILL_RATE
+      this.tokens + timePassed * currentRate
     );
     this.lastRefill = now;
   }
@@ -34,9 +53,31 @@ class TokenBucket {
     this.refill();
     if (this.tokens >= 1) {
       this.tokens -= 1;
+      // Reset consecutive failures on successful message
+      this.consecutiveFailures = 0;
       return true;
     }
+    
+    // Increment penalty on failed attempt
+    this.consecutiveFailures++;
+    if (this.consecutiveFailures >= 3) {
+      this.penaltyLevel = Math.min(this.penaltyLevel + 1, MAX_PENALTIES);
+      this.lastPenaltyTime = Date.now();
+      this.consecutiveFailures = 0;
+    }
+    
     return false;
+  }
+
+  getPenaltyInfo() {
+    if (this.penaltyLevel === 0) return null;
+    
+    const currentRate = this.getCurrentRefillRate();
+    const waitTime = Math.ceil(1 / currentRate);
+    return {
+      level: this.penaltyLevel,
+      waitSeconds: waitTime
+    };
   }
 }
 
@@ -52,7 +93,7 @@ wss.on('connection', (ws) => {
   let room = null;
   
   // Create a new rate limiter for this connection
-  rateLimiters.set(ws, new TokenBucket());
+  rateLimiters.set(ws, new AdaptiveTokenBucket());
 
   ws.on('message', (data) => {
     const message = JSON.parse(data);
@@ -78,10 +119,12 @@ wss.on('connection', (ws) => {
       // Check rate limit
       const rateLimiter = rateLimiters.get(ws);
       if (!rateLimiter.tryConsume()) {
+        const penaltyInfo = rateLimiter.getPenaltyInfo();
         ws.send(JSON.stringify({
           type: 'error',
           code: 'RATE_LIMIT_EXCEEDED',
-          user: message.user || 'Anonymous'
+          user: message.user || 'Anonymous',
+          penalty: penaltyInfo
         }));
         return;
       }
