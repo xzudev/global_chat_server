@@ -7,40 +7,52 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const rooms = {};
-const messageRateLimit = new Map(); // Store message timestamps for rate limiting
 
-// Constants for rate limiting
+// Rate limiting configuration
+const BUCKET_CAPACITY = 5; // Maximum tokens a user can have
+const REFILL_RATE = 1; // Tokens per second
+const REFILL_INTERVAL = 1000; // Check every 1 second
 const MAX_MESSAGE_LENGTH = 500;
-const MAX_MESSAGES = 5;
-const TIME_WINDOW = 5000; // 5 seconds in milliseconds
+
+class TokenBucket {
+  constructor() {
+    this.tokens = BUCKET_CAPACITY;
+    this.lastRefill = Date.now();
+  }
+
+  refill() {
+    const now = Date.now();
+    const timePassed = (now - this.lastRefill) / 1000; // Convert to seconds
+    this.tokens = Math.min(
+      BUCKET_CAPACITY,
+      this.tokens + timePassed * REFILL_RATE
+    );
+    this.lastRefill = now;
+  }
+
+  tryConsume() {
+    this.refill();
+    if (this.tokens >= 1) {
+      this.tokens -= 1;
+      return true;
+    }
+    return false;
+  }
+}
+
+// Store rate limiters for each connection
+const rateLimiters = new Map();
 
 function sanitize(text) {
   // Remove any tags
   return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function isRateLimited(ws) {
-  const now = Date.now();
-  if (!messageRateLimit.has(ws)) {
-    messageRateLimit.set(ws, [now]);
-    return false;
-  }
-
-  const timestamps = messageRateLimit.get(ws);
-  // Remove timestamps older than TIME_WINDOW
-  const recentTimestamps = timestamps.filter(time => now - time < TIME_WINDOW);
-  messageRateLimit.set(ws, recentTimestamps);
-
-  if (recentTimestamps.length >= MAX_MESSAGES) {
-    return true;
-  }
-
-  recentTimestamps.push(now);
-  return false;
-}
-
 wss.on('connection', (ws) => {
   let room = null;
+  
+  // Create a new rate limiter for this connection
+  rateLimiters.set(ws, new TokenBucket());
 
   ws.on('message', (data) => {
     const message = JSON.parse(data);
@@ -64,7 +76,8 @@ wss.on('connection', (ws) => {
       }
 
       // Check rate limit
-      if (isRateLimited(ws)) {
+      const rateLimiter = rateLimiters.get(ws);
+      if (!rateLimiter.tryConsume()) {
         ws.send(JSON.stringify({
           type: 'error',
           code: 'RATE_LIMIT_EXCEEDED',
@@ -91,8 +104,8 @@ wss.on('connection', (ws) => {
       rooms[room].delete(ws);
       if (rooms[room].size === 0) delete rooms[room];
     }
-    // Clean up rate limit data
-    messageRateLimit.delete(ws);
+    // Clean up rate limiter
+    rateLimiters.delete(ws);
   });
 });
 
