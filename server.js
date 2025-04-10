@@ -7,10 +7,36 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
 const rooms = {};
+const messageRateLimit = new Map(); // Store message timestamps for rate limiting
+
+// Constants for rate limiting
+const MAX_MESSAGE_LENGTH = 500;
+const MAX_MESSAGES = 5;
+const TIME_WINDOW = 5000; // 5 seconds in milliseconds
 
 function sanitize(text) {
   // Remove any tags
   return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function isRateLimited(ws) {
+  const now = Date.now();
+  if (!messageRateLimit.has(ws)) {
+    messageRateLimit.set(ws, [now]);
+    return false;
+  }
+
+  const timestamps = messageRateLimit.get(ws);
+  // Remove timestamps older than TIME_WINDOW
+  const recentTimestamps = timestamps.filter(time => now - time < TIME_WINDOW);
+  messageRateLimit.set(ws, recentTimestamps);
+
+  if (recentTimestamps.length >= MAX_MESSAGES) {
+    return true;
+  }
+
+  recentTimestamps.push(now);
+  return false;
 }
 
 wss.on('connection', (ws) => {
@@ -27,6 +53,22 @@ wss.on('connection', (ws) => {
     }
 
     if (message.type === 'chat' && room) {
+      // Check message length
+      if (!message.text || message.text.length > MAX_MESSAGE_LENGTH) {
+        ws.send(JSON.stringify({
+          error: `Message too long. Maximum length is ${MAX_MESSAGE_LENGTH} characters.`
+        }));
+        return;
+      }
+
+      // Check rate limit
+      if (isRateLimited(ws)) {
+        ws.send(JSON.stringify({
+          error: `Too many messages. Please wait a few seconds before sending more.`
+        }));
+        return;
+      }
+
       const safeText = sanitize(message.text);
       for (const client of rooms[room]) {
         if (client.readyState === WebSocket.OPEN) {
@@ -44,6 +86,8 @@ wss.on('connection', (ws) => {
       rooms[room].delete(ws);
       if (rooms[room].size === 0) delete rooms[room];
     }
+    // Clean up rate limit data
+    messageRateLimit.delete(ws);
   });
 });
 
