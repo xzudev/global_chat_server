@@ -56,7 +56,9 @@ wss.on('connection', (ws) => {
       // Check message length
       if (!message.text || message.text.length > MAX_MESSAGE_LENGTH) {
         ws.send(JSON.stringify({
-          error: `Message too long. Maximum length is ${MAX_MESSAGE_LENGTH} characters.`
+          type: 'error',
+          code: 'MESSAGE_TOO_LONG',
+          user: message.user || 'Anonymous'
         }));
         return;
       }
@@ -64,7 +66,9 @@ wss.on('connection', (ws) => {
       // Check rate limit
       if (isRateLimited(ws)) {
         ws.send(JSON.stringify({
-          error: `Too many messages. Please wait a few seconds before sending more.`
+          type: 'error',
+          code: 'RATE_LIMIT_EXCEEDED',
+          user: message.user || 'Anonymous'
         }));
         return;
       }
@@ -73,6 +77,7 @@ wss.on('connection', (ws) => {
       for (const client of rooms[room]) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
+            type: 'chat',
             user: message.user || 'Anonymous',
             text: safeText
           }));
