@@ -8,6 +8,11 @@ const wss = new WebSocket.Server({ server });
 
 const rooms = {};
 
+function sanitize(text) {
+  // Remove any tags
+  return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 wss.on('connection', (ws) => {
   let room = null;
 
@@ -22,11 +27,12 @@ wss.on('connection', (ws) => {
     }
 
     if (message.type === 'chat' && room) {
+      const safeText = sanitize(message.text);
       for (const client of rooms[room]) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
             user: message.user || 'Anonymous',
-            text: message.text
+            text: safeText
           }));
         }
       }
