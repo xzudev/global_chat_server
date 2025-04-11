@@ -2,6 +2,8 @@ const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
+const Message = require('./models/Message');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,6 +20,12 @@ const PENALTY_MULTIPLIER = 2; // How much to increase cooldown on spam
 const PENALTY_DURATION = 30000; // How long penalties last (30 seconds)
 const MAX_PENALTIES = 4; // Maximum number of penalty levels
 const MAX_MESSAGE_LENGTH = 500;
+
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
 class AdaptiveTokenBucket {
   constructor() {
@@ -121,6 +129,21 @@ wss.on('connection', (ws) => {
 
       rooms[room] = rooms[room] || new Set();
       rooms[room].add(ws);
+
+      // Fetch last 50 messages from DB for this room
+      Message.find({ room })
+        .sort({ timestamp: 1 })
+        .limit(50)
+        .then(history => {
+          ws.send(JSON.stringify({
+            type: 'history',
+            messages: history
+          }));
+        })
+        .catch(err => {
+          console.error('Error fetching history:', err);
+        });
+
       return;
     }
 
@@ -149,6 +172,17 @@ wss.on('connection', (ws) => {
       }
 
       const safeText = sanitize(message.text);
+      
+      // Save message to database
+      const msg = new Message({
+        room,
+        user: username,
+        text: safeText
+      });
+
+      msg.save().catch(err => console.error('Failed to save message:', err));
+
+      // Broadcast message to all clients in the room
       for (const client of rooms[room]) {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
