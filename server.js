@@ -3,7 +3,7 @@ const express = require('express');
 const http = require('http');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
-const Message = require('./models/Message');
+const Message = require('Message');
 
 const app = express();
 const server = http.createServer(app);
