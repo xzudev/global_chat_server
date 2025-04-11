@@ -1,11 +1,13 @@
 const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
 const rooms = {};
 
 // Rate limiting configuration
@@ -91,6 +93,7 @@ function sanitize(text) {
 
 wss.on('connection', (ws) => {
   let room = null;
+  let username = 'Anonymous';
   
   // Create a new rate limiter for this connection
   rateLimiters.set(ws, new AdaptiveTokenBucket());
@@ -100,6 +103,22 @@ wss.on('connection', (ws) => {
 
     if (message.type === 'join') {
       room = message.url;
+
+      if (message.token) {
+        try {
+          const decoded = jwt.verify(message.token, JWT_SECRET);
+          username = decoded.username || 'Anonymous';
+        } catch (err) {
+          console.warn('Invalid token:', err.message);
+          ws.send(JSON.stringify({
+            type: 'error',
+            code: 'INVALID_TOKEN',
+            message: 'Authentication failed.'
+          }));
+          return;
+        }
+      }
+
       rooms[room] = rooms[room] || new Set();
       rooms[room].add(ws);
       return;
@@ -111,7 +130,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({
           type: 'error',
           code: 'MESSAGE_TOO_LONG',
-          user: message.user || 'Anonymous'
+          user: username
         }));
         return;
       }
@@ -123,7 +142,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({
           type: 'error',
           code: 'RATE_LIMIT_EXCEEDED',
-          user: message.user || 'Anonymous',
+          user: username,
           penalty: penaltyInfo
         }));
         return;
@@ -134,7 +153,7 @@ wss.on('connection', (ws) => {
         if (client.readyState === WebSocket.OPEN) {
           client.send(JSON.stringify({
             type: 'chat',
-            user: message.user || 'Anonymous',
+            user: username,
             text: safeText
           }));
         }
